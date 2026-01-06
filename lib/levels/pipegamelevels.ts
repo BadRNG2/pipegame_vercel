@@ -127,7 +127,8 @@ function buildLevelString(
   ex: number,
   ey: number,
   path: [number, number][],
-  rnd: () => number
+  rnd: () => number,
+  noSpill = false
 ) {
   const total = gx * gy;
   // initialize tokens with empty marker (we'll set exactly one 0)
@@ -209,16 +210,36 @@ function buildLevelString(
   for (let y = 0; y < gy; y++)
     for (let x = 0; x < gx; x++)
       if (!path.some(([px, py]) => px === x && py === y)) freeCells.push([x, y]);
+  let zeroX = -1,
+    zeroY = -1;
   if (freeCells.length === 0) {
     // if none free, remove last non-start/end path node to be empty
     if (path.length > 2) {
       const [rx, ry] = path[path.length - 2];
       tokens[ry * gx + rx] = 0;
+      zeroX = rx;
+      zeroY = ry;
     }
   } else {
     const r = Math.floor(rnd() * freeCells.length);
     const [zx, zy] = freeCells[r];
     tokens[zy * gx + zx] = 0;
+    zeroX = zx;
+    zeroY = zy;
+  }
+
+  // If noSpill is requested, ensure no neighbor connects into the empty cell
+  if (noSpill && zeroX >= 0 && zeroY >= 0) {
+    const neighs = neighbors(zeroX, zeroY, gx, gy);
+    for (const [nx, ny, dirToEmpty] of neighs) {
+      const nidx = ny * gx + nx;
+      // remove the neighbor's connection pointing into the empty cell
+      // that is, clear the bit on the neighbor that points to (zeroX, zeroY)
+      // dirToEmpty here is the direction from the empty cell to the neighbor,
+      // so the neighbor's bit pointing to the empty cell is the opposite direction
+      const oppositeDir = dirOpp(dirToEmpty);
+      tokens[nidx] &= ~dirBit(oppositeDir);
+    }
   }
 
   // ensure no single-arm tiles remain: if any token is single-bit, add one extra connection to make it valid
@@ -228,9 +249,10 @@ function buildLevelString(
       const val = tokens[idx];
       if (val === 0) continue;
       if (val && (val & (val - 1)) === 0) {
-        // pick a neighbor to connect
+        // pick a neighbor to connect (avoid connecting to the empty cell when noSpill)
         const neigh = neighbors(x, y, gx, gy);
         for (const [nx, ny, d] of neigh) {
+          if (noSpill && nx === zeroX && ny === zeroY) continue;
           const nidx = ny * gx + nx;
           // connect both ways
           tokens[idx] |= dirBit(d);
@@ -255,21 +277,39 @@ function buildLevelString(
   return parts.join(' ');
 }
 
-function generateBatch(count: number, difficulty: 'easy' | 'normal' | 'hard', seed: number) {
+export function generateBatch(
+  count: number,
+  difficulty: 'easy' | 'normal' | 'hard',
+  seed: number,
+  noSpill = false
+) {
   const rnd = makeRng(seed);
   const out: string[] = [];
   for (let n = 0; n < count; n++) {
     let gx = 3,
       gy = 3;
+    // choose board size based on difficulty
     if (difficulty === 'easy') {
       gx = 3;
       gy = 3;
     } else if (difficulty === 'normal') {
-      gx = rnd() < 0.5 ? 4 : 4;
-      gy = rnd() < 0.5 ? 4 : 3;
+      // normal: usually 4-wide; vary between 4x3 and 4x4 for variety
+      if (rnd() < 0.5) {
+        gx = 4;
+        gy = 3;
+      } else {
+        gx = 4;
+        gy = 4;
+      }
     } else {
-      gx = 5;
-      gy = 5;
+      // hard: favor larger boards. Mostly 5x5, occasionally 6x5 for extra challenge
+      if (rnd() < 0.75) {
+        gx = 5;
+        gy = 5;
+      } else {
+        gx = 6;
+        gy = 5;
+      }
     }
 
     // pick faucet and goal on different edges
@@ -306,7 +346,7 @@ function generateBatch(count: number, difficulty: 'easy' | 'normal' | 'hard', se
       [sx, sy],
       [ex, ey],
     ];
-    const s = buildLevelString(gx, gy, sx, sy, ex, ey, path, rnd);
+    const s = buildLevelString(gx, gy, sx, sy, ex, ey, path, rnd, noSpill);
     out.push(s);
   }
   return out;

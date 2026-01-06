@@ -579,6 +579,7 @@ export default function Pipe({
         left: `${(left / sizeX) * 100}%`,
         width: `${100 / sizeX}%`,
         height: `${100 / sizeY}%`,
+        zIndex: 10,
       }}
       className={`aspect-square opacity-100 absolute rounded-md shadow-md border-1 border-black border-opacity-50 hover:opacity-80`}
       aria-label="Game piece"
@@ -588,6 +589,7 @@ export default function Pipe({
           position: 'relative',
           width: '100%',
           height: '100%',
+          zIndex: 10,
         }}
       >
         <svg
@@ -599,6 +601,7 @@ export default function Pipe({
             left: 0,
             width: '100%',
             height: '100%',
+            zIndex: 30,
           }}
         >
           {/* base pipe border (black) */}
@@ -609,7 +612,7 @@ export default function Pipe({
             strokeWidth="12"
             strokeLinecap="round"
             strokeLinejoin="round"
-            style={{ opacity: 0.5 }}
+            style={{ opacity: 1.0 }}
           />
           {/* base pipe (white) */}
           <polyline
@@ -619,7 +622,7 @@ export default function Pipe({
             strokeWidth="10"
             strokeLinecap="round"
             strokeLinejoin="round"
-            style={{ opacity: 0.9 }}
+            style={{ opacity: 1.0 }}
           />
           {/* overlay water — per-span polylines so we can animate segments independently */}
           {spans.map((s, idx) => {

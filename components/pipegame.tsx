@@ -8,7 +8,8 @@ import { PIPE_ANIMATION_DURATION } from '@/lib/constants';
 import { neighboringOffsets, pairings } from '@/lib/utils';
 import Confetti from 'react-confetti';
 
-import { easyLevels, normalLevels, hardLevels } from '@/lib/levels/pipegamelevels';
+import { easyLevels, normalLevels, hardLevels, generateBatch } from '@/lib/levels/pipegamelevels';
+import WaterSpill, { WaterSpillProps } from "@/components/waterspill";
 
 export default function PipeGame({
   sizeX = 4,
@@ -28,6 +29,7 @@ export default function PipeGame({
 
   const flowTimerRef = useRef<number | null>(null);
   const showPopupTimerRef = useRef<number | null>(null);
+  const spillPopupTimerRef = useRef<number | null>(null);
 
   const [gridSizeX, setGridSizeX] = useState(sizeX);
   const [gridSizeY, setGridSizeY] = useState(sizeY);
@@ -55,11 +57,16 @@ export default function PipeGame({
   const [goalReached, setGoalReached] = useState(false);
   const [lost, setLost] = useState(false);
   const [showPopup, setShowPopup] = useState(false);
+  const [noSpillMode, setNoSpillMode] = useState(false);
+  const [waterSpilled, setWaterSpilled] = useState<boolean>(false);
+  const [waterSpills, setWaterSpills] = useState<WaterSpillProps[]>([]);
 
   function initializeBoard() {
     setGoalReached(false);
     setLost(false);
     setShowPopup(false);
+    setWaterSpilled(false);
+    setWaterSpills([]);
     if (flowTimerRef.current !== null) {
       clearTimeout(flowTimerRef.current);
       flowTimerRef.current = null;
@@ -67,6 +74,10 @@ export default function PipeGame({
     if (showPopupTimerRef.current !== null) {
       clearTimeout(showPopupTimerRef.current);
       showPopupTimerRef.current = null;
+    }
+    if (spillPopupTimerRef.current !== null) {
+      clearTimeout(spillPopupTimerRef.current);
+      spillPopupTimerRef.current = null;
     }
 
     for (let i = 0; i < gridSizeX * gridSizeY; i++) {
@@ -91,11 +102,14 @@ export default function PipeGame({
   }, []);
 
   useEffect(() => {
-    showPopupTimerRef.current = window.setTimeout(() => {
-      if (goalReached) {
-        setShowPopup(true);
-      }
-    }, 3000);
+    // schedule goal popup only if not already scheduled
+    if (showPopupTimerRef.current == null) {
+      showPopupTimerRef.current = window.setTimeout(() => {
+        if (goalReached) {
+          setShowPopup(true);
+        }
+      }, 3000);
+    }
   }, [goalReached]);
 
   // parse level string input and apply to grid + pipeDirections
@@ -352,11 +366,10 @@ export default function PipeGame({
     }
   }
 
-  const sampleLevels: { name: string; s: string }[] = [
-    { name: 'Small L-shape (3x3)', s: '3 3 0 A 6 9 3 5 3 0 9 A' },
-    { name: 'Top Row Line (4x3)', s: '4 3 0 C C C C 3 3 3 3 0 9 A 3' },
-    { name: 'Demo 4x4', s: '4 4 1 C 6 6 C 3 5 9 3 A 9 B 6 3 0 3 A' },
-  ];
+  function toggleNoSpillMode() {
+    setNoSpillMode(!noSpillMode);
+    newBoard();
+  }
 
   function resetBoard() {
     // restore default grid and clear flow-related state
@@ -391,6 +404,18 @@ export default function PipeGame({
     // try to load a level from the chosen difficulty lists; if none available,
     // fall back to generating an N x N board (easy=3, normal=4, hard=5)
     const pickLevelForDifficulty = (): string | null => {
+      // If NoSpill mode is active, prefer freshly generated levels with noSpill=true
+      if (noSpillMode) {
+        const seed = (Date.now() & 0xffffffff) >>> 0;
+        const genList = generateBatch(12, difficulty, seed, true);
+        const attempts = Math.min(genList.length, 12);
+        for (let a = 0; a < attempts; a++) {
+          const candidate = genList[Math.floor(Math.random() * genList.length)];
+          if (isLevelStringSolvable(candidate)) return candidate;
+        }
+        for (const candidate of genList) if (isLevelStringSolvable(candidate)) return candidate;
+        return null;
+      }
       const list =
         difficulty === 'easy' ? easyLevels : difficulty === 'hard' ? hardLevels : normalLevels;
       if (!list || list.length === 0) return null;
@@ -535,6 +560,8 @@ export default function PipeGame({
       flowStatus,
       goalReached,
     });
+    // When NoSpill mode is enabled, only determine win/lose at flow completion
+    if (noSpillMode) return;
     const lastPiecePosition: Vector2D = { x: endingX, y: endingY };
     const lastPieceValue =
       grid[lastPiecePosition.y] && grid[lastPiecePosition.y][lastPiecePosition.x];
@@ -542,7 +569,7 @@ export default function PipeGame({
     // check if last piece has an exit facing the goal side and is flowing
     const lastPieceDirs = pipeDirections[lastPieceValue] || [];
     if (lastPieceDirs.includes(endingSide) && flowStatus[lastPieceValue]) {
-      if (!goalReached) {
+      if (!goalReached && (!noSpillMode || !waterSpilled)) {
         console.log('Goal reached!');
         setGoalReached(true);
       }
@@ -597,73 +624,135 @@ export default function PipeGame({
   function progressFlow() {
     checkEnding();
     const newFlows: number[] = [];
-    // for each piece that is flowing, set neighboring pieces to flow if they have matching entry/exits
     console.log('progressFlow start', { flowStatus, pipeDirections });
 
     const newFlowStatus = { ...flowStatus };
     let anyNewFlow = false;
-    for (let j = 0; j < gridSizeY; j++) {
-      for (let i = 0; i < gridSizeX; i++) {
-        const pieceValue = grid[j][i];
-        if (flowStatus[pieceValue]) {
-          const directions = pipeDirections[pieceValue] || [];
-          for (const dir of directions) {
-            const [di, dj] = neighboringOffsets[dir];
-            const ni = i + di;
-            const nj = j + dj;
-            if (ni >= 0 && ni < gridSizeX && nj >= 0 && nj < gridSizeY) {
-              const neighborValue = grid[nj][ni];
-              const neighborDirections = pipeDirections[neighborValue] || [];
-              if (neighborDirections.includes(pairings[dir]) && !newFlowStatus[neighborValue]) {
-                newFlowStatus[neighborValue] = true;
-                newFlows.push(neighborValue);
-                flowIncoming[neighborValue] = pairings[dir] as Direction;
-                anyNewFlow = true;
-                console.log(
-                  `Piece ${neighborValue} at (${ni},${nj}) now flowing due to piece ${pieceValue} at (${i},${j})`
-                );
+
+    for (let y = 0; y < gridSizeY; y++) {
+      for (let x = 0; x < gridSizeX; x++) {
+        const pieceValue = grid[y][x];
+        if (!pieceValue) continue;
+        if (!flowStatus[pieceValue]) continue;
+
+        const directions = pipeDirections[pieceValue] || [];
+        for (const dir of directions) {
+          const [dx, dy] = neighboringOffsets[dir];
+          const nx = x + dx;
+          const ny = y + dy;
+
+          // in-bounds neighbor
+          if (nx >= 0 && nx < gridSizeX && ny >= 0 && ny < gridSizeY) {
+            const neighborValue = grid[ny][nx];
+            const neighborDirections = pipeDirections[neighborValue] || [];
+
+            if (neighborDirections.includes(pairings[dir]) && !newFlowStatus[neighborValue]) {
+              newFlowStatus[neighborValue] = true;
+              newFlows.push(neighborValue);
+              flowIncoming[neighborValue] = pairings[dir] as Direction;
+              anyNewFlow = true;
+              console.log(
+                `Piece ${neighborValue} at (${nx},${ny}) now flowing due to piece ${pieceValue} at (${x},${y})`
+              );
+            } else if (noSpillMode) {
+              const isEmptyNeighbor = neighborValue === 0;
+              const hasNeighborDirs = neighborDirections && neighborDirections.length > 0;
+              const isDisconnected = hasNeighborDirs ? !neighborDirections.includes(pairings[dir]) : false;
+              if (isEmptyNeighbor || isDisconnected) {
+                const spillKey = `${nx},${ny}`;
+                if (waterSpills.some(s => `${s.i},${s.j}` === spillKey)) continue;
+                const wasAlreadySpilled = waterSpilled;
+                setWaterSpilled(true);
+                const newSpill: WaterSpillProps = {
+                  i: nx,
+                  j: ny,
+                  sizeX: gridSizeX,
+                  sizeY: gridSizeY,
+                  incomingDir: pairings[dir] as Direction,
+                  side: pairings[dir] as Direction,
+                };
+                setWaterSpills(prev => (prev.some(s => `${s.i},${s.j}` === spillKey) ? prev : [...prev, newSpill]));
+                setLost(true);
+                if (!wasAlreadySpilled && spillPopupTimerRef.current == null) {
+                  spillPopupTimerRef.current = window.setTimeout(() => setShowPopup(true), 400) as unknown as number;
+                }
+              }
+            }
+          } else {
+            // outside board
+            // check if this out-of-bounds neighbor is the goal position; if so, mark goal reached and skip spill
+            const goalX = endingX + (endingSide === 'right' ? 1 : endingSide === 'left' ? -1 : 0);
+            const goalY = endingY + (endingSide === 'down' ? 1 : endingSide === 'up' ? -1 : 0);
+            if (nx === goalX && ny === goalY) {
+              if (!goalReached) {
+                setGoalReached(true);
+              }
+              continue;
+            }
+            if (noSpillMode) {
+              // if the out-of-bounds direction corresponds to the faucet location, allow flow into faucet (no spill)
+              let intoFaucet = false;
+              if (dir === 'left' && nx === -1 && faucetSide === 'left' && faucetX === 0 && faucetY === y) intoFaucet = true;
+              if (dir === 'right' && nx === gridSizeX && faucetSide === 'right' && faucetX === gridSizeX - 1 && faucetY === y) intoFaucet = true;
+              if (dir === 'up' && ny === -1 && faucetSide === 'up' && faucetY === 0 && faucetX === x) intoFaucet = true;
+              if (dir === 'down' && ny === gridSizeY && faucetSide === 'down' && faucetY === gridSizeY - 1 && faucetX === x) intoFaucet = true;
+              if (intoFaucet) continue;
+
+              const spillKey = `${nx},${ny}`;
+              if (waterSpills.some(s => `${s.i},${s.j}` === spillKey)) continue;
+              const wasAlreadySpilled = waterSpilled;
+              setWaterSpilled(true);
+              const newSpill: WaterSpillProps = {
+                i: nx,
+                j: ny,
+                sizeX: gridSizeX,
+                sizeY: gridSizeY,
+                incomingDir: pairings[dir] as Direction,
+                side: pairings[dir] as Direction,
+              };
+              setWaterSpills(prev => (prev.some(s => `${s.i},${s.j}` === spillKey) ? prev : [...prev, newSpill]));
+              setLost(true);
+              if (!wasAlreadySpilled && spillPopupTimerRef.current == null) {
+                spillPopupTimerRef.current = window.setTimeout(() => setShowPopup(true), 400) as unknown as number;
               }
             }
           }
         }
       }
     }
+
     console.log('progressFlow result anyNewFlow=', anyNewFlow, 'newFlowStatus=', newFlowStatus);
     setFlowStatus(newFlowStatus);
     if (anyNewFlow) {
-      for (const nf of newFlows) {
-        flowStatus[nf] = true;
-      }
+      for (const nf of newFlows) newFlowStatus[nf] = true;
       flowTimerRef.current = window.setTimeout(() => {
-        console.log('FlowStatus after timeout:', flowStatus);
+        console.log('FlowStatus after timeout:', newFlowStatus);
+        // copy newFlowStatus back into the mutable flowStatus map for next iteration
+        for (const k in newFlowStatus) {
+          // @ts-ignore
+          flowStatus[k] = newFlowStatus[k];
+        }
         progressFlow();
       }, PIPE_ANIMATION_DURATION) as unknown as number;
     } else {
       console.log('Flow complete');
       lockMovement = false;
-      // determine goal status synchronously from current/new flow maps to avoid
-      // race conditions with React state updates
       try {
         const lastPieceValue = grid[endingY] && grid[endingY][endingX];
         const lastPieceDirs = pipeDirections[lastPieceValue] || [];
         const isFlowingNow = Boolean(newFlowStatus[lastPieceValue] || flowStatus[lastPieceValue]);
         if (lastPieceValue && lastPieceDirs.includes(endingSide) && isFlowingNow) {
-          if (!goalReached) {
+          if (!goalReached && (!noSpillMode || !waterSpilled)) {
             console.log('Goal reached (detected at flow completion)');
             setGoalReached(true);
           }
         } else {
-          if (!goalReached) {
+          if (!lost && !goalReached && (!noSpillMode || !waterSpilled)) {
             console.log('Flow finished without reaching goal — you lost');
             setLost(true);
-            if (showPopupTimerRef.current !== null) {
-              clearTimeout(showPopupTimerRef.current);
-              showPopupTimerRef.current = null;
+            if (showPopupTimerRef.current == null) {
+              showPopupTimerRef.current = window.setTimeout(() => setShowPopup(true), 1500) as unknown as number;
             }
-            showPopupTimerRef.current = window.setTimeout(
-              () => setShowPopup(true),
-              400
-            ) as unknown as number;
           }
         }
       } catch (e) {
@@ -727,7 +816,7 @@ export default function PipeGame({
 
   return (
     <div className="flex items-center justify-center w-full h-full">
-      {goalReached && (
+      {(false &&goalReached && !lost) && (
         <div className="absolute inset-0 pointer-events-none z-60">
           <Confetti />
         </div>
@@ -758,13 +847,21 @@ export default function PipeGame({
                 backgroundColor: lost ? 'rgba(200,30,45,0.95)' : 'rgba(250,204,21,0.95)',
               }}
             >
-              {lost ? (
+              {lost ? waterSpilled ? (
+                <>
+                  <h2 className="text-3xl font-bold mb-4">You lost</h2>
+                  <p className="text-lg">The water spilled.</p>
+                </>
+              ) : (
                 <>
                   <h2 className="text-3xl font-bold mb-4">You lost</h2>
                   <p className="text-lg">The flow finished without reaching the goal.</p>
                 </>
               ) : (
                 <>
+                  <div className="absolute inset-0 pointer-events-none z-60">
+                    <Confetti />
+                  </div>
                   <h2 className="text-3xl font-bold mb-4">Congratulations!</h2>
                   <p className="text-lg">You've reached the goal!</p>
                 </>
@@ -799,9 +896,13 @@ export default function PipeGame({
               onClick={resetBoard}
               className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-white text-sm"
               style={{
-                width: '84px',
-                height: '32px',
+                minWidth: '56px',
+                height: '26px',
+                padding: '0 8px',
+                fontSize: '12px',
                 whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
                 textAlign: 'center',
                 display: 'flex',
                 alignItems: 'center',
@@ -815,9 +916,13 @@ export default function PipeGame({
               onClick={newBoard}
               className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-white text-sm"
               style={{
-                width: '84px',
-                height: '32px',
+                minWidth: '56px',
+                height: '26px',
+                padding: '0 8px',
+                fontSize: '12px',
                 whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
                 textAlign: 'center',
                 display: 'flex',
                 alignItems: 'center',
@@ -826,16 +931,39 @@ export default function PipeGame({
             >
               New Board
             </button>
+            <button
+              type="button"
+              onClick={toggleNoSpillMode}
+              className={`px-3 py-1 ${noSpillMode ? 'bg-red-500' : 'bg-gray-700'} hover:${noSpillMode ? 'bg-red-400' : 'bg-gray-600'} rounded text-white text-sm`}
+              style={{
+                minWidth: '56px',
+                height: '26px',
+                padding: '0 8px',
+                fontSize: '12px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                textAlign: 'center',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              Spills: {noSpillMode ? 'On' : 'Off'}
+            </button>
             <select
               value={difficulty}
               onChange={e => setDifficulty(e.target.value as 'easy' | 'normal' | 'hard')}
               className="bg-gray-700 hover:bg-gray-600 rounded text-white text-sm"
               style={{
-                width: '96px',
-                height: '32px',
+                minWidth: '64px',
+                height: '26px',
                 boxSizing: 'border-box',
-                padding: '0 10px',
+                padding: '0 6px',
+                fontSize: '12px',
                 whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
                 textAlign: 'center',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -853,9 +981,13 @@ export default function PipeGame({
               aria-label="Play"
               className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-sm font-medium shadow-sm"
               style={{
-                width: '84px',
-                height: '32px',
+                minWidth: '56px',
+                height: '26px',
+                padding: '0 8px',
+                fontSize: '12px',
                 whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
                 textAlign: 'center',
                 display: 'flex',
                 alignItems: 'center',
@@ -930,6 +1062,18 @@ export default function PipeGame({
               />
             );
           })()}
+          {/* water spills */}
+          {waterSpills.map((spill, idx) => (
+            <WaterSpill
+              key={`spill-${idx}`}
+              i={spill.i}
+              j={spill.j}
+              sizeX={spill.sizeX}
+              sizeY={spill.sizeY}
+              incomingDir={spill.incomingDir}
+              side={spill.side}
+            />
+          ))}
         </div>
       </div>
     </div>
